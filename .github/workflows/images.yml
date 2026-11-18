@@ -204,7 +204,7 @@ jobs:
       # "gh attestation verify oci://<image>@<digest> --owner <owner>".
       - name: Attest provenance
         if: steps.decide.outputs.push == 'true'
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: actions/attest-build-provenance@REPLACE_WITH_PINNED_SHA # vX (pin before use)
         with:
           subject-name: ${{ steps.decide.outputs.image }}
           subject-digest: ${{ steps.push.outputs.digest }}
