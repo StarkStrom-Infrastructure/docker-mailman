@@ -3,8 +3,10 @@
 FROM alpine:3.23
 
 # Set the commits that we are building.
-ARG CORE_REF
-ARG MM3_HK_REF
+# Pinned commits of Mailman core and the HyperKitty archiver plugin. Override
+# with --build-arg to build other revisions (branch names and tags work too).
+ARG CORE_REF=d229bc0ec37a630f43e9e59105b31493baaae97b
+ARG MM3_HK_REF=c63183f8d77fd65bd026b72d2610509802773cf6
 
 #Install all required packages, add user for executing mailman and set execution
 #rights for startup script
@@ -16,8 +18,8 @@ RUN --mount=type=cache,target=/root/.cache \
         curl python3 py3-pip linux-headers py-cryptography mariadb-connector-c tzdata \
     && python3 -m pip install -U --break-system-packages psycopg2 pymysql setuptools wheel \
     && python3 -m pip install --break-system-packages \
-        git+https://gitlab.com/mailman/mailman \
-        git+https://gitlab.com/mailman/mailman-hyperkitty \
+        git+https://gitlab.com/mailman/mailman@${CORE_REF} \
+        git+https://gitlab.com/mailman/mailman-hyperkitty@${MM3_HK_REF} \
     && apk del build-deps \
     && adduser -S mailman
 
