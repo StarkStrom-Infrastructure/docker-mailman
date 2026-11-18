@@ -4,7 +4,7 @@ name: images
 # (core/Dockerfile, released Mailman) and mailman-web (web/Dockerfile.dev,
 # pinned Postorius/HyperKitty revisions on Django 5.2) and publishes them to
 # ghcr.io/<owner>/. Pull requests and pushes build and smoke test; pushes to
-# main publish. A daily run rebuilds without cache and publishes only if the
+# the default branch publish. A daily run rebuilds without cache and publishes only if the
 # published image has pending apk upgrades or its Alpine base changed.
 # Rollback: pin the previous <version>-rN tag or digest in the deployment.
 
@@ -51,11 +51,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Login to GHCR
+        # Before Decide: the published images may be private.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Decide
         id: decide
         env:
           EVENT: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           FORCE: ${{ inputs.force }}
           BEFORE: ${{ github.event.before }}
           IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.name }}
@@ -69,7 +79,7 @@ jobs:
           case "$EVENT" in
             pull_request) ;;
             push)
-              [ "$REF_NAME" = main ] && push=true ;;
+              [ "$REF_NAME" = "$DEFAULT_BRANCH" ] && push=true ;;
             workflow_dispatch | schedule)
               no_cache=true
               if [ "$FORCE" = true ]; then
@@ -138,14 +148,6 @@ jobs:
           echo "version=${v%%+*}" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      - name: Login to GHCR
-        if: steps.decide.outputs.push == 'true'
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       # First unused <version>-rN; only a "not found" answer means the tag is free.
       - name: Rebuild number
         id: rebuild
@@ -204,7 +206,7 @@ jobs:
       # "gh attestation verify oci://<image>@<digest> --owner <owner>".
       - name: Attest provenance
         if: steps.decide.outputs.push == 'true'
-        uses: actions/attest-build-provenance@REPLACE_WITH_PINNED_SHA # vX (pin before use)
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ steps.decide.outputs.image }}
           subject-digest: ${{ steps.push.outputs.digest }}
