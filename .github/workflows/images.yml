@@ -4,8 +4,9 @@ name: images
 # (core/Dockerfile, released Mailman) and mailman-web (web/Dockerfile.dev,
 # pinned Postorius/HyperKitty revisions on Django 5.2) and publishes them to
 # ghcr.io/<owner>/. Pull requests and pushes build and smoke test; pushes to
-# the default branch publish. A daily run rebuilds without cache and publishes only if the
-# published image has pending apk upgrades or its Alpine base changed.
+# the default branch publish. A daily run rebuilds without cache and publishes
+# if the Alpine base changed, or if the published image has pending apk upgrades
+# that the fresh build has fewer of.
 # Rollback: pin the previous <version>-rN tag or digest in the deployment.
 
 on:
@@ -75,7 +76,7 @@ jobs:
           IMAGE="${IMAGE,,}"  # registry names are lowercase
           base=$(sed -n 's/^FROM \([^ ]*\).*/\1/p' "$DOCKERFILE" | head -n1)
           base_digest=$(docker buildx imagetools inspect "$base" --format '{{ .Manifest.Digest }}')
-          build=true push=false no_cache=false
+          build=true push=false no_cache=false pending_only=
           case "$EVENT" in
             pull_request) ;;
             push)
@@ -85,12 +86,18 @@ jobs:
               if [ "$FORCE" = true ]; then
                 push=true
               elif out=$(docker pull --quiet --platform linux/amd64 "$IMAGE:latest" 2>&1); then
-                # A failing "apk update" or "docker run" must not look like "nothing pending".
-                pending=$(docker run --rm --user 0 --entrypoint sh "$IMAGE:latest" \
-                  -c 'apk update >/dev/null && apk upgrade --simulate' | grep -c '^(' || true)
+                # A failing "apk update" or "docker run" fails the step: it must not look like "nothing pending".
+                upgrade=$(docker run --rm --user 0 --entrypoint sh "$IMAGE:latest" \
+                  -c 'apk update >/dev/null && apk upgrade --simulate')
+                pending=$(grep -c '^(' <<< "$upgrade" || true)
                 built_from=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.base.digest" }}' "$IMAGE:latest")
                 echo "Pending upgrades: $pending; base published ${built_from:-none}, now $base_digest"
-                if [ "$pending" -gt 0 ] || [ "$built_from" != "$base_digest" ]; then push=true; fi
+                if [ "$built_from" != "$base_digest" ]; then
+                  push=true
+                elif [ "$pending" -gt 0 ]; then
+                  # only pending upgrades: published below if the fresh build has fewer
+                  push=true pending_only=$pending
+                fi
               elif grep -qiE 'not found|manifest unknown' <<< "$out"; then
                 push=true
               else
@@ -105,6 +112,7 @@ jobs:
             echo "build=$build"
             echo "push=$push"
             echo "no_cache=$no_cache"
+            echo "pending_only=$pending_only"
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
@@ -130,6 +138,30 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
           provenance: false
 
+      # The Dockerfile does not upgrade packages itself, so a fresh build has
+      # the same pending upgrades as the published image while Alpine is ahead
+      # of the base image. Publishing then would add a tag every day without a
+      # change: publish for pending upgrades only if the fresh build has fewer.
+      - name: Compare pending upgrades
+        id: fresh
+        if: steps.decide.outputs.build == 'true'
+        env:
+          PUSH: ${{ steps.decide.outputs.push }}
+          PENDING_ONLY: ${{ steps.decide.outputs.pending_only }}
+          NAME: ${{ matrix.name }}
+        run: |
+          if [ "$PUSH" = true ] && [ -n "$PENDING_ONLY" ]; then
+            upgrade=$(docker run --rm --user 0 --entrypoint sh "test:$NAME" \
+              -c 'apk update >/dev/null && apk upgrade --simulate')
+            fresh=$(grep -c '^(' <<< "$upgrade" || true)
+            echo "Pending upgrades: published $PENDING_ONLY, fresh build $fresh"
+            if [ "$fresh" -ge "$PENDING_ONLY" ]; then
+              echo "Not fewer; not publishing"
+              PUSH=false
+            fi
+          fi
+          echo "push=$PUSH" >> "$GITHUB_OUTPUT"
+
       - name: Smoke test
         if: steps.decide.outputs.build == 'true'
         run: |
@@ -151,7 +183,7 @@ jobs:
       # First unused <version>-rN; only a "not found" answer means the tag is free.
       - name: Rebuild number
         id: rebuild
-        if: steps.decide.outputs.push == 'true'
+        if: steps.fresh.outputs.push == 'true'
         env:
           IMAGE: ${{ steps.decide.outputs.image }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -170,7 +202,7 @@ jobs:
 
       - name: Docker meta
         id: meta
-        if: steps.decide.outputs.push == 'true'
+        if: steps.fresh.outputs.push == 'true'
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ steps.decide.outputs.image }}
@@ -186,9 +218,11 @@ jobs:
             org.opencontainers.image.base.name=${{ steps.decide.outputs.base }}
             org.opencontainers.image.base.digest=${{ steps.decide.outputs.base_digest }}
 
+      # Reuses the layers of the test build above (scope), so the published
+      # image is the one that was compared.
       - name: Build and push
         id: push
-        if: steps.decide.outputs.push == 'true'
+        if: steps.fresh.outputs.push == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ matrix.context }}
@@ -205,7 +239,7 @@ jobs:
       # Signed provenance in the GitHub attestation store, verifiable with
       # "gh attestation verify oci://<image>@<digest> --owner <owner>".
       - name: Attest provenance
-        if: steps.decide.outputs.push == 'true'
+        if: steps.fresh.outputs.push == 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ steps.decide.outputs.image }}
